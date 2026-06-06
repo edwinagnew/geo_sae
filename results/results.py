@@ -46,6 +46,31 @@ try:
 except ImportError:
     _TORCH = False
 
+_RF_RNG = np.random.default_rng(42)
+
+
+def _mean_pairwise_dist(X: np.ndarray, max_pts: int = 2000, n_pairs: int = 5000) -> float:
+    """Estimate mean pairwise Euclidean distance in ambient space by sampling pairs.
+
+    Subsample to max_pts before pair sampling so cost is O(n_pairs * d) regardless
+    of how many points fired.
+    """
+    n = X.shape[0]
+    if n < 2:
+        return 0.0
+    if n > max_pts:
+        idx = _RF_RNG.choice(n, max_pts, replace=False)
+        X = X[idx]
+        n = max_pts
+    n_pairs = min(n_pairs, n * (n - 1) // 2)
+    if n_pairs == 0:
+        return 0.0
+    a = _RF_RNG.integers(0, n, n_pairs)
+    b = _RF_RNG.integers(0, n, n_pairs)
+    same = a == b
+    b[same] = (b[same] + 1) % n
+    return float(np.sqrt(((X[a] - X[b]) ** 2).sum(-1)).mean())
+
 
 # ── Geometric greedy OMP + SVD deflation (paper's compute_r2 algorithm) ─────────
 #
@@ -148,19 +173,26 @@ def _support_stats(
     z_j: np.ndarray,
     min_fires: int,
     percentile: float,
+    contribs_j: np.ndarray | None = None,
+    manifold_diam: float | None = None,
 ) -> tuple[int, list[float]]:
-    """(n_support, coverages) for one manifold instance.
+    """(n_support, rf_vals) for one manifold instance.
 
     Paper (Appendix E): atom is in support iff
       - fires on ≥ 10% of the n_j manifold-active eval points  (relative threshold)
       - fires on ≥ min_fires points  (absolute floor for tiny manifolds)
     "Firing" = |z| above the atom's 10th-percentile nonzero activation magnitude.
 
+    rf_vals is mean pairwise Euclidean distance in ambient space normalized by
+    manifold diameter (paper's definition) when contribs_j and manifold_diam are
+    provided, or firing fraction as a fallback for old snapshots.
+
     GPU path vectorises the per-atom percentile loop via sort+gather over the
     full (n_j, d_sae) matrix — eliminates 512 serial np.percentile calls.
     """
     n_j = z_j.shape[0]
     min_fires_eff = max(min_fires, int(0.10 * n_j))   # paper's 10% relative condition
+    use_spatial = contribs_j is not None and manifold_diam is not None and manifold_diam > 1e-8
 
     if _TORCH:
         with torch.no_grad():
@@ -181,29 +213,49 @@ def _support_stats(
             thresholds = sorted_abs.gather(0, pct_idx.unsqueeze(0)).squeeze(0)  # (d_sae,)
 
             above = (z_abs >= thresholds.unsqueeze(0)).sum(0)
-            in_support = candidates & (above >= min_fires_eff)
-            n_support = int(in_support.sum().item())
+            in_support_t = candidates & (above >= min_fires_eff)
+            n_support = int(in_support_t.sum().item())
             if n_support == 0:
                 return 0, []
 
-            coverages = fire[:, in_support].float().mean(0).tolist()
+            if not use_spatial:
+                coverages = fire[:, in_support_t].float().mean(0).tolist()
+                return n_support, coverages
+
+            in_support_np = in_support_t.cpu().numpy()
+            thresholds_np = thresholds.cpu().numpy()
+
+    else:
+        fire_np = (z_j != 0)
+        n_fires_np = fire_np.sum(0)
+        d_sae = z_j.shape[1]
+        in_support_np = np.zeros(d_sae, dtype=bool)
+        thresholds_np = np.zeros(d_sae, dtype=np.float32)
+        for a in np.where(n_fires_np >= min_fires)[0]:
+            nz = np.abs(z_j[fire_np[:, a], a])
+            t = float(np.percentile(nz, percentile))
+            thresholds_np[a] = t
+            if (np.abs(z_j[:, a]) >= t).sum() >= min_fires_eff:
+                in_support_np[a] = True
+        n_support = int(in_support_np.sum())
+        if n_support == 0:
+            return 0, []
+        if not use_spatial:
+            coverages = fire_np[:, in_support_np].mean(0).tolist()
             return n_support, coverages
 
-    fire = (z_j != 0)
-    n_fires = fire.sum(0)
-    candidates = np.where(n_fires >= min_fires)[0]
-    d_sae = z_j.shape[1]
-    in_support = np.zeros(d_sae, dtype=bool)
-    for a in candidates:
-        nz = np.abs(z_j[fire[:, a], a])
-        threshold = float(np.percentile(nz, percentile))
-        if (np.abs(z_j[:, a]) >= threshold).sum() >= min_fires_eff:
-            in_support[a] = True
-    n_support = int(in_support.sum())
-    if n_support == 0:
-        return 0, []
-    coverages = fire[:, in_support].mean(0).tolist()
-    return n_support, coverages
+    # Correct paper metric: mean pairwise Euclidean distance in ambient space,
+    # normalized by manifold's own mean pairwise distance.
+    z_abs_np = np.abs(z_j)
+    rf_vals: list[float] = []
+    for a in np.where(in_support_np)[0]:
+        fired_mask = z_abs_np[:, a] >= thresholds_np[a]
+        pts = contribs_j[fired_mask]  # type: ignore[index]
+        if len(pts) < 2:
+            rf_vals.append(0.0)
+            continue
+        rf_vals.append(min(_mean_pairwise_dist(pts) / manifold_diam, 1.0))  # type: ignore[operator]
+    return n_support, rf_vals
 
 
 # ── Panel C helpers ───────────────────────────────────────────────────────────
@@ -389,10 +441,13 @@ def _update_panel_b(
     print(f"  [Panel B] k={k}", flush=True)
     codes = snap["eval_codes"]
     active_mask = snap["active_mask"]
+    # instance_contribs[j] is (n_j, d_ambient) for manifold j's active eval points.
+    # Present in fresh snapshots (extract_snapshot includes it); absent in old ones.
+    instance_contribs: list | None = snap.get("instance_contribs")
     st["k_values"].append(k)
 
     support_sizes: list[int] = []
-    all_coverages: list[float] = []
+    all_rf_vals: list[float] = []
     for j in range(active_mask.shape[1]):
         act_j = active_mask[:, j]
         n_j = int(act_j.sum())
@@ -403,14 +458,21 @@ def _update_panel_b(
         # points. The 10% threshold in _support_stats naturally excludes atoms from the
         # L0-1 co-active manifolds (their conditional fire rate ≈ (L0-1)/(M-1) ≈ 6.4%
         # for our zoo with M=48, L0=4 — below the 10% cutoff).
-        z_j = codes[act_j]   # (n_j, d_sae) — all atoms
-        n_sup, covs = _support_stats(z_j, min_fires, percentile)
+        z_j = codes[act_j]   # (n_j, d_sae)
+
+        contribs_j: np.ndarray | None = None
+        manifold_diam: float | None = None
+        if instance_contribs is not None:
+            contribs_j = np.asarray(instance_contribs[j], dtype=np.float32)
+            manifold_diam = _mean_pairwise_dist(contribs_j)
+
+        n_sup, rf_vals = _support_stats(z_j, min_fires, percentile, contribs_j, manifold_diam)
         if n_sup > 0:
             support_sizes.append(n_sup)
-            all_coverages.extend(covs)
+            all_rf_vals.extend(rf_vals)
 
     st["mean_support_size"][k] = float(np.mean(support_sizes)) if support_sizes else 0.0
-    st["mean_rf_diameter"][k] = float(np.median(all_coverages)) if all_coverages else 0.0
+    st["mean_rf_diameter"][k] = float(np.median(all_rf_vals)) if all_rf_vals else 0.0
 
 
 def _finalize_panel_b(st: dict) -> dict:
@@ -514,6 +576,27 @@ def update_results_state(
         state["fig4d"] = build_fig4d_payload(snap)
 
 
+def _compress_logs(raw_logs: dict, max_pts: int = 1000) -> dict:
+    """Downsample per-k log entry lists to compact numpy arrays.
+
+    Reduces ~38MB of raw Python dicts to ~150KB of float32 arrays with no
+    meaningful loss of curve shape (training runs are 20k+ steps).
+    """
+    out = {}
+    for k, entries in raw_logs.items():
+        if not entries:
+            continue
+        stride = max(1, len(entries) // max_pts)
+        sampled = entries[::stride]
+        out[k] = {
+            "steps":   np.array([e["step"] for e in sampled], dtype=np.int32),
+            "l1_loss": np.array([e.get("l1_loss", e.get("loss", math.nan)) for e in sampled], dtype=np.float32),
+            "fvu":     np.array([e.get("fvu",     math.nan) for e in sampled], dtype=np.float32),
+            "n_dead":  np.array([e.get("n_dead",  math.nan) for e in sampled], dtype=np.float32),
+        }
+    return out
+
+
 def finalize_results_state(state: dict) -> dict:
     """Return completed Figure 4 data as a single dict ready to pickle.
 
@@ -526,7 +609,7 @@ def finalize_results_state(state: dict) -> dict:
         "panel_c": _finalize_panel_c(state["panel_c"]),
     }
     if state.get("logs"):
-        out["logs"] = state["logs"]
+        out["logs"] = _compress_logs(state["logs"])
     if state.get("fig4d") is not None:
         out["fig4d"] = state["fig4d"]
     return out
