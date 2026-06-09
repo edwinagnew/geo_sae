@@ -1,3 +1,7 @@
+"""
+Signed BatchTopK SAE — extends sae_lens's BatchTopKTrainingSAE with absolute-value
+feature selection so that negative pre-activations (e.g. cos θ) are preserved.
+"""
 from dataclasses import dataclass
 from typing import Callable
 
@@ -45,7 +49,7 @@ class SignedBatchTopKSAEConfig(BatchTopKTrainingSAEConfig):
     def __post_init__(self) -> None:
         if self.d_sae == 0:
             self.d_sae = self.d_in * self.expansion_factor
-        super().__post_init__()  # SAEConfig validates normalize_activations
+        super().__post_init__()  # SAEConfig validates normalise_activations
 
     @override
     @classmethod
@@ -120,4 +124,3 @@ class SignedBatchTopKSAE(BatchTopKTrainingSAE):
             * scale
             * (recons - residual).pow(2).sum(dim=-1).mean()
         )
-

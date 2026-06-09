@@ -24,29 +24,27 @@ from pathlib import Path
 
 import numpy as np
 
-# ── Import compute module ─────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import results as _results  # noqa: E402
+import results as _results  # noqa: E402  (results.py lives alongside this script)
 
-FIGS_DIR = Path("results/figs/") #os.path.join(os.path.dirname(os.path.abspath(__file__)), "figs")
+FIGS_DIR = Path("results/figs/")
 
 ALL_FIGURES = [
     "aggregate_r2",
     "phase_diagram",
-    "reconstruction_regimes",
     "r2_by_type",
     "r2_at_ki_bar",
     "phi_capture",
     "phi_matrix",
     "signed_cohesion",
     "loss_curves",
-    "tuning_curves",
+    "coordinate_encoding",
 ]
 EXTRA_FIGURES = ["reconstruction_grid"]  # not in ALL_FIGURES; requires --shape
 
 COLORS = {"baseline": "steelblue", "baseline_batch": "orange", "signed": "green", "penal": "red"}
 LABELS = {"baseline": "TopK (baseline)", "baseline_batch": "BatchTopK",
-          "signed": "Signed", "penal": "Penalized"}
+          "signed": "Signed", "penal": "Penalised"}
 ATOM_COLORS = [
     "#e41a1c", "#377eb8", "#4daf4a", "#984ea3",
     "#ff7f00", "#a65628", "#f781bf", "#999999",
@@ -81,7 +79,7 @@ def parse_snapshot_filename(path: str) -> tuple[str, str] | None:
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-def load_raw(path: str) -> dict:
+def load_snapshot(path: str) -> dict:
     print(f"Loading {os.path.basename(path)} ...", end=" ", flush=True)
     with open(path, "rb") as f:
         d = pickle.load(f)
@@ -89,53 +87,16 @@ def load_raw(path: str) -> dict:
     return d
 
 
-def detect_format(d: dict) -> str:
-    keys = list(d.keys())
-    if not keys:
-        return "unknown"
-    if "panel_a" in keys:
-        return "finalized"
-    first_val = next(iter(d.values()))
-    if isinstance(first_val, dict) and ("eval_codes" in first_val or "W_dec" in first_val):
-        return "raw"
-    return "unknown"
+def extract_loss_curves(logs: dict) -> dict[int, dict[str, list]]:
+    """Convert compressed logs to plottable lists.
 
-
-def ensure_finalized(v: str, raw: dict) -> tuple[dict, dict | None]:
-    fmt = detect_format(raw)
-    print(f"  {v}: format={fmt}, top-level keys={sorted(raw.keys())[:6]}")
-    if fmt == "finalized":
-        return raw, None
-    if fmt == "raw":
-        print(f"  {v}: running compute_figure4 ...", flush=True)
-        finalized = _results.compute_figure4(raw)
-        return finalized, raw
-    raise ValueError(f"Unknown format for {v}: keys={sorted(raw.keys())[:8]}")
-
-
-# ── Loss extraction ────────────────────────────────────────────────────────────
-
-def extract_loss_curves(raw_by_k: dict) -> dict[int, dict[str, list]]:
-    curves: dict[int, dict[str, list]] = {}
-    for k, snap in sorted(raw_by_k.items()):
-        # Compressed format (finalized logs): snap is already {metric: np.ndarray}
-        if isinstance(snap, dict) and "steps" in snap and isinstance(snap["steps"], np.ndarray):
-            curves[k] = {m: snap[m].tolist() for m in ("steps", "l1_loss", "fvu", "n_dead") if m in snap}
-            continue
-        # Raw format: snap is a snapshot dict or a list of log entries directly
-        logs = snap if isinstance(snap, list) else snap.get("logs", [])
-        if not logs:
-            continue
-        steps, l1s, fvus, dead = [], [], [], []
-        for entry in logs:
-            if "step" not in entry:
-                continue
-            steps.append(entry["step"])
-            l1s.append(entry.get("l1_loss", entry.get("loss", float("nan"))))
-            fvus.append(entry.get("fvu", float("nan")))
-            dead.append(entry.get("n_dead", float("nan")))
-        curves[k] = {"steps": steps, "l1_loss": l1s, "fvu": fvus, "n_dead": dead}
-    return curves
+    logs: {k: {steps: int32_arr, l1_loss: float32_arr, fvu: float32_arr, n_dead: float32_arr}}
+    """
+    return {
+        k: {m: entry[m].tolist() for m in ("steps", "l1_loss", "fvu", "n_dead") if m in entry}
+        for k, entry in sorted(logs.items())
+        if isinstance(entry, dict) and "steps" in entry
+    }
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
@@ -197,7 +158,7 @@ def plot_aggregate_r2(data: dict[str, dict], out_path: str) -> None:
 
     fig, ax = plt.subplots(figsize=(6, 4))
     for v, d in data.items():
-        pa = d["panel_a"]
+        pa = d["r2"]
         ks   = pa["k_values"]
         r2s  = [pa["aggregate_r2"][k] for k in ks]
         stds = [pa["aggregate_r2_std"][k] for k in ks]
@@ -206,10 +167,9 @@ def plot_aggregate_r2(data: dict[str, dict], out_path: str) -> None:
                         [r - s for r, s in zip(r2s, stds)],
                         [r + s for r, s in zip(r2s, stds)],
                         alpha=0.15, color=COLORS.get(v, "gray"))
-    ax.axvline(4, color="gray", ls=":", lw=0.8, label="paper sweet-spot (k=4)")
     ax.set_xlabel("Training sparsity k")
     ax.set_ylabel("Aggregate restricted R²")
-    ax.set_title("Figure 4A — Restricted R² vs sparsity")
+    ax.set_title("Aggregate restricted R² vs training sparsity k")
     ax.legend(fontsize=8)
     ax.axhline(0, color="black", lw=0.4)
     plt.tight_layout()
@@ -224,9 +184,9 @@ def plot_phase_diagram(data: dict[str, dict], out_path: str) -> None:
     import matplotlib.pyplot as plt
 
     fig, (ax_sup, ax_rf) = plt.subplots(1, 2, figsize=(10, 4))
-    fig.suptitle("Figure 4B — Phase diagram", fontsize=10)
+    fig.suptitle("Phase diagram: support size and RF diameter vs k", fontsize=10)
     for v, d in data.items():
-        pb = d["panel_b"]
+        pb = d["coverage"]
         ks  = pb["k_values"]
         sup = [pb["mean_support_size"][k] for k in ks]
         rf  = [pb["mean_rf_diameter"][k] for k in ks]
@@ -242,57 +202,6 @@ def plot_phase_diagram(data: dict[str, dict], out_path: str) -> None:
     print(f"Saved: {out_path}")
 
 
-def plot_reconstruction_regimes(data: dict[str, dict], out_path: str) -> None:
-    """Fig 4B replica: phase diagram of RF spread vs support size.
-
-    Each (support_size, rf_diameter) pair is one k value; connecting them
-    traces the trajectory through Shattering → Capture → Dilution as k grows.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    _ANNOTATE_K = {3, 8, 14, 25}  # k values to label on the baseline curve
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-
-    for v, d in data.items():
-        pb  = d["panel_b"]
-        ks  = pb["k_values"]
-        sup = [pb["mean_support_size"][k] for k in ks]
-        rf  = [pb["mean_rf_diameter"][k]  for k in ks]
-        color = COLORS.get(v, "gray")
-        label = LABELS.get(v, v)
-        ax.plot(sup, rf, "o-", color=color, label=label, lw=1.8, ms=5, zorder=3)
-        if v == "baseline":
-            for k, sx, rx in zip(ks, sup, rf):
-                if k in _ANNOTATE_K:
-                    ax.annotate(
-                        f"k={k}", (sx, rx),
-                        textcoords="offset points", xytext=(5, 3),
-                        fontsize=7, color=color,
-                    )
-
-    # Regime labels: Shattering=top-left (low k), Dilution=bottom-right (high k),
-    # Capture=mid-left inflection (intermediate k)
-    ax.text(0.05, 0.97, "Shattering", transform=ax.transAxes,
-            fontsize=8, va="top", style="italic", color="#555555")
-    ax.text(0.97, 0.08, "Dilution", transform=ax.transAxes,
-            fontsize=8, va="bottom", ha="right", style="italic", color="#555555")
-    ax.text(0.18, 0.62, "Capture", transform=ax.transAxes,
-            fontsize=8, va="bottom", style="italic", color="#555555")
-
-    ax.set_xlabel("Support size (atoms / manifold)", fontsize=10)
-    ax.set_ylabel("RF spread (coverage fraction)", fontsize=10)
-    ax.set_title("Regimes of manifold reconstruction", fontsize=11)
-    ax.legend(fontsize=8, loc="upper center")
-    ax.set_ylim(bottom=0)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=130, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {out_path}")
-
-
 def plot_r2_by_type(data: dict[str, dict], out_path: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -302,10 +211,10 @@ def plot_r2_by_type(data: dict[str, dict], out_path: str) -> None:
 
     ref_k = None
     if "baseline" in data:
-        pa = data["baseline"]["panel_a"]
+        pa = data["baseline"]["r2"]
         ref_k = max(pa["k_values"], key=lambda k: pa["aggregate_r2"].get(k, -9))
     if ref_k is None:
-        pa = next(iter(data.values()))["panel_a"]
+        pa = next(iter(data.values()))["r2"]
         ref_k = max(pa["k_values"], key=lambda k: pa["aggregate_r2"].get(k, -9))
 
     fig, axes = plt.subplots(2, 4, figsize=(14, 6), sharey=False)
@@ -316,7 +225,7 @@ def plot_r2_by_type(data: dict[str, dict], out_path: str) -> None:
         ax = axes[ti]
         ki = _KI[mtype]
         for v, d in data.items():
-            pa = d["panel_a"]
+            pa = d["r2"]
             sweeps = []
             for inst_name, by_k in pa["r2_sweep"].items():
                 if _inst_type(inst_name) == mtype and ref_k in by_k:
@@ -348,7 +257,7 @@ def plot_r2_at_ki_bar(data: dict[str, dict], out_path: str) -> None:
     import matplotlib.pyplot as plt
 
     types = sorted(_KI.keys())
-    k_vals = sorted(next(iter(data.values()))["panel_a"]["k_values"])
+    k_vals = sorted(next(iter(data.values()))["r2"]["k_values"])
     x = np.arange(len(types))
     width = 0.8 / len(data)
     offsets = (np.arange(len(data)) - (len(data) - 1) / 2) * width
@@ -360,7 +269,7 @@ def plot_r2_at_ki_bar(data: dict[str, dict], out_path: str) -> None:
 
     for ki_ax, k in zip(axes, k_vals):
         for i, (v, d) in enumerate(data.items()):
-            pa = d["panel_a"]
+            pa = d["r2"]
             scores = []
             for mtype in types:
                 ki = _KI[mtype]
@@ -393,10 +302,10 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    k_vals = sorted(next(iter(data.values()))["panel_a"]["k_values"])
+    k_vals = sorted(next(iter(data.values()))["r2"]["k_values"])
     sweet_k = {}
     for v, d in data.items():
-        pa = d["panel_a"]
+        pa = d["r2"]
         sweet_k[v] = max(pa["k_values"], key=lambda k: pa["aggregate_r2"].get(k, -9))
     ref_k = sweet_k.get("baseline", k_vals[len(k_vals) // 2])
 
@@ -405,7 +314,7 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
                  fontsize=10)
 
     for v, d in data.items():
-        pc = d["panel_c"]
+        pc = d["phi"]
         mean_phis = []
         for k in k_vals:
             if k not in pc["phi_matrices"]:
@@ -426,14 +335,13 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
             mean_phis.append(float(np.mean(within_vals)) if within_vals else float("nan"))
         ax_mean.plot(k_vals, mean_phis, "o-", color=COLORS.get(v, "gray"), label=LABELS.get(v, v))
 
-    #ax_mean.axhline(0, color="black", lw=0.8, ls="--")
     ax_mean.set_xlabel("Training sparsity k")
     ax_mean.set_ylabel("Mean within-manifold phi")
     ax_mean.set_title("Phi coherence vs k  (capture ↑, tiling ↓)")
     ax_mean.legend(fontsize=8)
 
     for v, d in data.items():
-        pc = d["panel_c"]
+        pc = d["phi"]
         if ref_k not in pc["phi_matrices"]:
             continue
         phi       = pc["phi_matrices"][ref_k]
@@ -451,7 +359,6 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
         ax_hist.hist(within_vals, bins=40, alpha=0.5, color=COLORS.get(v, "gray"),
                      label=LABELS.get(v, v), density=True)
 
-    #ax_hist.axvline(0, color="black", lw=0.8, ls="--")
     ax_hist.set_xlabel("Within-manifold phi (pairwise)")
     ax_hist.set_ylabel("Density")
     ax_hist.set_title(f"Distribution at k={ref_k}")
@@ -478,7 +385,7 @@ def plot_phi_matrix(data: dict[str, dict], out_path: str, k: int = 10) -> None:
 
     im = None
     for ax, (v, d) in zip(axes, plot_variants.items()):
-        pc = d["panel_c"]
+        pc = d["phi"]
         if k not in pc["phi_matrices"]:
             ax.set_title(f"{LABELS.get(v, v)}\n(k={k} not found)")
             continue
@@ -517,16 +424,17 @@ def plot_phi_matrix(data: dict[str, dict], out_path: str, k: int = 10) -> None:
     print(f"Saved: {out_path}")
 
 
-def plot_signed_cohesion(data: dict[str, dict], out_path: str, k: int = 10) -> None:
+def plot_signed_cohesion(data: dict[str, dict], out_path: str, k: int = 10, L0: int = 4) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    inst_names = next(iter(data.values()))["panel_c"]["instance_names"]
-    k_vals = sorted(next(iter(data.values()))["panel_c"]["k_values"])
-    L0 = 4
-    mean_ki = sum(_KI.values()) / len(_KI)
-    tau1_k  = L0 * mean_ki
+    pc0        = next(iter(data.values()))["phi"]
+    inst_names = pc0["instance_names"]
+    k_vals     = sorted(pc0["k_values"])
+    inst_ki    = pc0["instance_ki"]
+    mean_ki    = sum(inst_ki) / len(inst_ki)
+    tau1_k     = L0 * mean_ki
 
     fig, (ax_box, ax_vs_k) = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle("Signed cohesion ρ(G) per manifold  (proxy: global marginal phi)", fontsize=10)
@@ -548,31 +456,27 @@ def plot_signed_cohesion(data: dict[str, dict], out_path: str, k: int = 10) -> N
         return rhos
 
     for vi, (v, d) in enumerate(data.items()):
-        pc   = d["panel_c"]
+        pc   = d["phi"]
         rhos = _get_rhos(pc, k)
         if not rhos:
             continue
         ax_box.boxplot(rhos, positions=[vi], widths=0.5, patch_artist=True,
                        boxprops=dict(facecolor=COLORS.get(v, "gray"), alpha=0.6),
                        medianprops=dict(color="black", lw=2))
-        print(f"  {LABELS.get(v, v):22s}  mean ρ={np.mean(rhos):.3f}  median ρ={np.median(rhos):.3f}")
 
     ax_box.set_xticks(range(len(data)))
     ax_box.set_xticklabels([LABELS.get(v, v) for v in data], rotation=10, ha="right", fontsize=8)
-    ax_box.axhline(0,  color="black", lw=0.8, ls="--")
-    #ax_box.axhline(+1, color="green", lw=0.6, ls=":", label="capture (+1)")
-    #ax_box.axhline(-1, color="red",   lw=0.6, ls=":", label="tiling (−1)")
     ax_box.set_ylabel("ρ(G)")
     ax_box.set_title(f"Distribution at k={k}")
-    ax_box.legend(fontsize=8)
 
     for v, d in data.items():
-        pc = d["panel_c"]
-        mean_rhos = [float(np.mean(_get_rhos(pc, kk))) if _get_rhos(pc, kk) else float("nan")
-                     for kk in k_vals]
+        pc = d["phi"]
+        mean_rhos = []
+        for kk in k_vals:
+            rh = _get_rhos(pc, kk)
+            mean_rhos.append(float(np.mean(rh)) if rh else float("nan"))
         ax_vs_k.plot(k_vals, mean_rhos, "o-", color=COLORS.get(v, "gray"), label=LABELS.get(v, v))
 
-    ax_vs_k.axhline(0, color="black", lw=0.8, ls="--")
     ax_vs_k.axvline(tau1_k, color="orange", lw=1.2, ls="--", label=f"τ=1  (k={tau1_k:.1f})")
     ax_vs_k.text(tau1_k * 0.35, -0.85, "shattering", color="gray", fontsize=7, ha="center")
     ax_vs_k.text(tau1_k * 1.7,  -0.85, "dilution",   color="gray", fontsize=7, ha="center")
@@ -587,102 +491,393 @@ def plot_signed_cohesion(data: dict[str, dict], out_path: str, k: int = 10) -> N
     print(f"Saved: {out_path}")
 
 
-def _intrinsic_param(coords: np.ndarray) -> np.ndarray:
-    """1D summary of k_i-dimensional intrinsic coordinates."""
-    if coords.shape[1] == 1:
-        return coords[:, 0]
-    return np.arctan2(coords[:, 1], coords[:, 0])
+# ── Reconstruction grid — Fig 11 style ───────────────────────────────────────
+
+_RECON_N_ATOMS = (1, 2, 4, 8, 16)
 
 
-def plot_tuning_curves(data: dict[str, dict], out_path: str) -> None:
-    """Tuning curves: SAE feature activation vs. intrinsic manifold coordinate.
+def _find_instance(vis_data: dict, shape_name: str) -> dict | None:
+    """Return the first instance whose name matches or contains shape_name."""
+    for inst in vis_data["instances"]:
+        if inst["name"] == shape_name or shape_name in inst["name"]:
+            return inst
+    return None
 
-    Uses fig4d payload (fixed k_SAE=10). One row per manifold type (first instance
-    of each type), one column per variant.
+
+def _coord_colors(coords: np.ndarray) -> np.ndarray:
+    """Map intrinsic coordinates to a scalar in [0, 1] for colormapping.
+
+    Uses atan2 of the first two coord axes for k_i≥2 (captures circular structure).
+    Falls back to normalised first axis for k_i=1.
+    """
+    if coords.shape[1] >= 2:
+        angle = np.arctan2(coords[:, 1], coords[:, 0])
+        return (angle - angle.min()) / max(angle.max() - angle.min(), 1e-8)
+    c = coords[:, 0]
+    return (c - c.min()) / max(c.max() - c.min(), 1e-8)
+
+
+def _prepare_panels(
+    inst: dict,
+    W_dec: np.ndarray,
+    n_pca: int,
+    n_atoms_list: tuple[int, ...] = _RECON_N_ATOMS,
+) -> dict | None:
+    """Fig 11 style: per-sample top-n reconstruction, colored by intrinsic coordinate.
+
+    For each column n in n_atoms_list, every sample uses its n most-active atoms
+    from the isolated single-manifold forward pass. The color is fixed to the
+    intrinsic manifold coordinate, making piecewise-linear structure visible as a
+    continuous color gradient.
+    """
+    from sklearn.decomposition import PCA
+
+    if "iso_indices" not in inst:
+        return None
+
+    contribs = inst["contribs"]     # (n_j, d)
+    coords   = inst["coords"]       # (n_j, k_i)
+    iso_idx  = inst["iso_indices"]  # (n_j, k_max) int16, sorted by |val| desc, -1=padding
+    iso_val  = inst["iso_values"]   # (n_j, k_max) float32
+    n_j      = len(contribs)
+
+    if n_j == 0:
+        return None
+
+    pca        = PCA(n_components=n_pca)
+    coords_pca = pca.fit_transform(contribs)
+    colors     = _coord_colors(coords)
+
+    valid_mask = iso_idx >= 0  # (n_j, k_max)
+    safe_idx   = np.where(valid_mask, iso_idx, 0).astype(np.int32)  # safe for W_dec indexing
+
+    recons = []
+    for n in n_atoms_list:
+        n = min(n, iso_idx.shape[1])
+        top_val = np.where(valid_mask[:, :n], iso_val[:, :n], 0.0)  # (n_j, n)
+        top_W   = W_dec[safe_idx[:, :n]]                             # (n_j, n, d)
+        recon_n = np.einsum("ij,ijd->id", top_val, top_W)            # (n_j, d)
+        recons.append(pca.transform(recon_n))
+
+    return {
+        "coords_pca":   coords_pca,
+        "colors":       colors,
+        "recons":       recons,
+        "n_atoms_list": n_atoms_list,
+    }
+
+
+def plot_reconstruction_grid(
+    shape_name: str,
+    snapshots_by_variant: dict[str, dict],
+    out_path: str | None = None,
+    interactive: bool = False,
+    n_atoms_list: tuple[int, ...] = _RECON_N_ATOMS,
+) -> None:
+    """Fig 11-style reconstruction grid: rows=variants, cols=n_atoms, color=manifold coord.
+
+    Args:
+        shape_name: substring to match against instance names (e.g. "helix").
+        snapshots_by_variant: {variant_name: finalised snapshot dict}
+        out_path: PNG save path; defaults to results/figs/reconstruction_grid_{shape}.png
+        interactive: if True return a Plotly figure (for notebooks); else save PNG.
+        n_atoms_list: atom counts shown as columns (default 1,2,4,8,16).
+    """
+    n_pca = 3 if interactive else 2
+    variant_panels: dict[str, dict] = {}
+
+    for variant, snap in snapshots_by_variant.items():
+        vis_data = snap.get("vis_data")
+        if vis_data is None:
+            print(f"  [{variant}] no vis_data in snapshot — skipping")
+            continue
+        inst = _find_instance(vis_data, shape_name)
+        if inst is None:
+            print(f"  [{variant}] no instance matching '{shape_name}' — skipping")
+            continue
+        panels = _prepare_panels(inst, vis_data["W_dec"], n_pca=n_pca, n_atoms_list=n_atoms_list)
+        if panels is None:
+            print(f"  [{variant}] no active samples — skipping")
+            continue
+        variant_panels[variant] = panels
+
+    if not variant_panels:
+        raise ValueError(f"No variants produced data for '{shape_name}'")
+
+    if interactive:
+        return _plotly_grid(shape_name, variant_panels)
+    _matplotlib_grid(shape_name, variant_panels, out_path)
+
+
+def _plotly_grid(shape_name: str, variant_panels: dict):
+    """3D rotatable Plotly figure — call from a notebook, not the CLI."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    variants     = list(variant_panels.keys())
+    n_variants   = len(variants)
+    n_atoms_list = next(iter(variant_panels.values()))["n_atoms_list"]
+    n_cols       = len(n_atoms_list) + 1  # PCA + reconstructions
+    n_rows       = n_variants
+
+    specs = [[{"type": "scene"}] * n_cols for _ in range(n_rows)]
+    fig = make_subplots(rows=n_rows, cols=n_cols, specs=specs,
+                        vertical_spacing=0.04, horizontal_spacing=0.02)
+
+    for vi, (variant, p) in enumerate(variant_panels.items()):
+        row = vi + 1
+        colors = p["colors"]
+
+        fig.add_trace(go.Scatter3d(
+            x=p["coords_pca"][:, 0], y=p["coords_pca"][:, 1], z=p["coords_pca"][:, 2],
+            mode="markers",
+            marker=dict(size=2, color=colors, colorscale="Twilight", opacity=0.8),
+            showlegend=False,
+        ), row=row, col=1)
+
+        for ci, recon in enumerate(p["recons"]):
+            fig.add_trace(go.Scatter3d(
+                x=recon[:, 0], y=recon[:, 1], z=recon[:, 2],
+                mode="markers",
+                marker=dict(size=2, color=colors, colorscale="Twilight", opacity=0.8),
+                showlegend=False,
+            ), row=row, col=ci + 2)
+
+    axis_kw = dict(showticklabels=False, showgrid=False, zeroline=False, title="")
+    fig.update_scenes(xaxis=axis_kw, yaxis=axis_kw, zaxis=axis_kw, aspectmode="cube")
+
+    row_h = 1.0 / n_rows
+    annots = []
+    for vi, variant in enumerate(variants):
+        annots.append(dict(
+            text=f"<b>{LABELS.get(variant, variant)}</b>",
+            x=-0.01, y=1.0 - (vi + 0.5) * row_h,
+            xref="paper", yref="paper",
+            showarrow=False, font=dict(size=9), xanchor="right",
+        ))
+    col_labels = ["PCA (true)"] + [f"k={n}" for n in n_atoms_list]
+    for ci, label in enumerate(col_labels):
+        annots.append(dict(
+            text=label, x=(ci + 0.5) / n_cols, y=1.01,
+            xref="paper", yref="paper",
+            showarrow=False, font=dict(size=8, color="#666"),
+        ))
+
+    fig.update_layout(
+        title=dict(text=f"Reconstruction grid — {shape_name}  (k_SAE=10)", font=dict(size=13)),
+        height=300 * n_rows, margin=dict(l=80, r=10, t=60, b=10), annotations=annots,
+    )
+    return fig
+
+
+def _matplotlib_grid(shape_name: str, variant_panels: dict, out_path: str | None):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    variants     = list(variant_panels.keys())
+    n_variants   = len(variants)
+    n_atoms_list = next(iter(variant_panels.values()))["n_atoms_list"]
+    n_cols       = len(n_atoms_list) + 1
+
+    fig = plt.figure(figsize=(2.8 * n_cols, 2.8 * n_variants))
+    gs  = GridSpec(n_variants, n_cols, figure=fig, hspace=0.15, wspace=0.05)
+
+    for vi, (variant, p) in enumerate(variant_panels.items()):
+        colors  = p["colors"]
+        scatter_kw = dict(c=colors, cmap="twilight", s=3, alpha=0.8, linewidths=0, vmin=0, vmax=1)
+
+        ax = fig.add_subplot(gs[vi, 0])
+        ax.scatter(p["coords_pca"][:, 0], p["coords_pca"][:, 1], **scatter_kw)
+        if vi == 0:
+            ax.set_title("PCA (true)", fontsize=8, pad=3)
+        # set_ylabel is hidden by axis("off"); use a rotated text annotation instead
+        ax.text(-0.08, 0.5, LABELS.get(variant, variant), transform=ax.transAxes,
+                fontsize=8, rotation=90, va="center", ha="right")
+        ax.set_aspect("equal"); ax.axis("off")
+
+        for ci, (n, recon) in enumerate(zip(n_atoms_list, p["recons"])):
+            ax = fig.add_subplot(gs[vi, ci + 1])
+            ax.scatter(recon[:, 0], recon[:, 1], **scatter_kw)
+            if vi == 0:
+                ax.set_title(f"k={n}", fontsize=8, pad=3)
+            ax.set_aspect("equal"); ax.axis("off")
+
+    plt.suptitle(f"Reconstruction grid — {shape_name}  (k_SAE=10)", fontsize=10, y=1.01)
+
+    if out_path:
+        plt.savefig(out_path, dpi=130, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {out_path}")
+    else:
+        plt.show()
+
+
+# ── Coordinate encoding diagnostic ───────────────────────────────────────────
+
+def plot_coordinate_encoding(
+    data: dict[str, dict],
+    out_path: str,
+    show_types: list[str] | None = None,
+) -> None:
+    """Diagnostic: do SAE atoms encode manifold coordinates globally?
+
+    For each selected manifold type and variant, shows:
+      Left panels: activation vs intrinsic coordinate for the k_i atoms with
+        highest mean |z| on isolated single-manifold inputs. Signed variant →
+        closed loops / smooth gradients. Baseline → fragmented positive bumps.
+      Right panel: globality — fraction of manifold samples where each atom fires.
+
+    Uses vis_data (stored at k=10) from each snapshot.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
-    _TYPES = ["circle", "sphere", "torus", "mobius", "swiss_roll", "helix", "flat_disk", "segment"]
-    variants   = [v for v in data if data[v].get("fig4d") is not None]
-    n_variants = len(variants)
+    if show_types is None:
+        show_types = ["segment", "circle", "sphere"]
 
-    if n_variants == 0:
-        print("  No variants have fig4d data — skipping tuning_curves.")
+    # variant → type → {"z_atoms": (n_j, k_i), "colors": (n_j,), "globality": (k_i,)}
+    panels: dict[str, dict[str, dict]] = {}
+
+    for variant, snap in data.items():
+        vis_data = snap.get("vis_data")
+        if vis_data is None:
+            continue
+        W_dec = vis_data["W_dec"]
+        variant_panels: dict[str, dict] = {}
+
+        d_sae = W_dec.shape[0]
+        for inst in vis_data["instances"]:
+            itype = inst["type"]
+            if itype not in show_types or itype in variant_panels:
+                continue
+            if "iso_indices" not in inst:
+                continue
+
+            coords = inst["coords"]   # (n_j, k_i)
+            k_i    = inst["k_i"]
+
+            # Expand sparse iso codes and select the k_i atoms with highest mean |z|.
+            # With isolated single-manifold inputs, these are directly the atoms that
+            # respond to this manifold — no OMP needed.
+            codes = _results.expand_iso_codes(inst, d_sae)    # (n_j, d_sae)
+            top_atoms = np.argsort(-np.abs(codes).mean(0))[:k_i]
+
+            z_atoms   = codes[:, top_atoms]                                    # (n_j, k_i)
+            globality = (z_atoms != 0).mean(axis=0).astype(np.float32)        # (k_i,)
+
+            variant_panels[itype] = {
+                "z_atoms":   z_atoms.astype(np.float32),
+                "colors":    _coord_colors(coords),
+                "globality": globality,
+                "k_i":       k_i,
+            }
+
+        panels[variant] = variant_panels
+
+    variants_with_data = [v for v in data if v in panels and panels[v]]
+    if not variants_with_data:
+        print("  No vis_data found for coordinate encoding plot.")
         return
 
-    fig, axes = plt.subplots(
-        len(_TYPES), n_variants,
-        figsize=(3.5 * n_variants, 2.8 * len(_TYPES)),
-        squeeze=False,
-    )
-    fig.suptitle("Tuning curves — activation vs. intrinsic coordinate  (k_SAE=10)",
-                 fontsize=11, y=1.01)
+    n_variants = len(variants_with_data)
+    n_types    = len(show_types)
+    n_cols     = n_types + 1  # scatter cols + globality panel
 
-    for ci, variant in enumerate(variants):
-        fig4d = data[variant]["fig4d"]
-        W_dec = fig4d["W_dec"]
+    fig = plt.figure(figsize=(3.0 * n_types + 3.5, 2.8 * n_variants))
+    gs  = GridSpec(n_variants, n_cols, figure=fig,
+                   hspace=0.25, wspace=0.35,
+                   width_ratios=[3.0] * n_types + [3.5])
 
-        inst_by_type: dict[str, dict] = {}
-        for inst in fig4d["instances"]:
-            t = inst.get("type") or _inst_type(inst["name"])
-            if t not in inst_by_type:
-                inst_by_type[t] = inst
+    globality_by_variant: dict[str, dict[str, np.ndarray]] = {}
 
-        for ri, mtype in enumerate(_TYPES):
-            ax   = axes[ri, ci]
-            inst = inst_by_type.get(mtype)
-            if inst is None:
+    for vi, variant in enumerate(variants_with_data):
+        vp = panels[variant]
+        globality_by_variant[variant] = {}
+
+        for ti, mtype in enumerate(show_types):
+            ax = fig.add_subplot(gs[vi, ti])
+            if mtype not in vp:
                 ax.axis("off")
                 continue
 
-            contribs = inst["contribs"]
-            codes    = inst["codes"]
-            coords   = inst["coords"]
-            k_i      = inst["k_i"]
+            p      = vp[mtype]
+            z      = p["z_atoms"]    # (n_j, k_i)
+            k_i    = p["k_i"]
+            globality_by_variant[variant][mtype] = p["globality"]
 
-            atoms = _results._greedy_select(contribs, W_dec, k_i)
-            if not atoms:
-                ax.axis("off")
-                continue
+            # X-axis: normalised intrinsic coordinate (atan2-based for k_i≥2, linear for k_i=1)
+            coord_axis = p["colors"]  # [0,1] scalar derived from intrinsic coords
 
-            param = _intrinsic_param(coords)
-            order = np.argsort(param)
+            # Activation profiles: each atom's activation vs intrinsic coordinate.
+            # For k_i=1: single curve; for k_i>1: k_i overlaid curves.
+            # Signed atoms: smooth/global (span [−1,1] with a curve).
+            # Baseline atoms: positive bumps (ReLU) covering different regions.
+            sort_idx = np.argsort(coord_axis)
+            x_sorted = coord_axis[sort_idx]
+            z_sorted = z[sort_idx]
 
-            for ai, atom in enumerate(atoms):
-                act   = codes[:, atom]
-                color = ATOM_COLORS[ai % len(ATOM_COLORS)]
-                ax.scatter(param[order], act[order],
-                           s=1.5, alpha=0.4, color=color, rasterized=True, linewidths=0)
+            for ai in range(k_i):
+                ax.scatter(x_sorted, z_sorted[:, ai],
+                           c=ATOM_COLORS[ai % len(ATOM_COLORS)],
+                           s=1, alpha=0.5, linewidths=0,
+                           label=f"atom {ai}")
 
-            ax.axhline(0, color="black", lw=0.5, alpha=0.5)
+            ax.axhline(0, color="gray", lw=0.6, alpha=0.5)
+            ax.set_xlim(0, 1)
             ax.tick_params(labelsize=6)
-            ax.set_xlim(float(param.min()), float(param.max()))
-            if ri == 0:
-                ax.set_title(LABELS.get(variant, variant), fontsize=9)
-            if ci == 0:
-                ax.set_ylabel(mtype, fontsize=8)
+            if vi == 0:
+                ax.set_title(f"{mtype}  (k_i={k_i})", fontsize=9)
+            if vi == n_variants - 1:
+                ax.set_xlabel("intrinsic coord (norm.)", fontsize=7)
+            if ti == 0:
+                ax.set_ylabel(f"{LABELS.get(variant, variant)}\nactivation", fontsize=7)
+            else:
+                ax.set_ylabel("activation", fontsize=7)
 
-    plt.tight_layout()
+        # Globality panel — collected after loop
+        ax_glob = fig.add_subplot(gs[vi, n_types])
+        x_pos = 0
+        for ti2, mtype2 in enumerate(show_types):
+            if mtype2 not in vp:
+                continue
+            glob = globality_by_variant[variant][mtype2]  # (k_i,)
+            k_i2 = vp[mtype2]["k_i"]
+            color = COLORS.get(variant, "gray")
+            for ai, g in enumerate(glob):
+                ax_glob.bar(x_pos, g, color=color, alpha=0.7 - 0.15 * ai, edgecolor="none")
+                ax_glob.text(x_pos, g + 0.02, f"{g:.2f}", ha="center", va="bottom",
+                             fontsize=5.5)
+                x_pos += 1
+            x_pos += 0.4  # gap between types
+
+        ax_glob.set_ylim(0, 1.15)
+        ax_glob.axhline(1.0, color="gray", lw=0.6, ls="--", alpha=0.7)
+        ax_glob.set_xticks([])
+        ax_glob.set_ylabel("support fraction", fontsize=7)
+        ax_glob.tick_params(labelsize=6)
+        if vi == 0:
+            ax_glob.set_title("Globality of selected atoms", fontsize=9)
+        if vi == n_variants - 1:
+            # Add type labels at bottom
+            x_pos2 = 0
+            for mtype2 in show_types:
+                if mtype2 not in vp:
+                    continue
+                k_i3 = vp[mtype2]["k_i"]
+                mid = x_pos2 + (k_i3 - 1) / 2
+                ax_glob.text(mid, -0.13, mtype2[:5], ha="center", va="top",
+                             fontsize=6.5, transform=ax_glob.transData)
+                x_pos2 += k_i3 + 0.4
+
+    plt.suptitle("Coordinate encoding: activation vs intrinsic coordinate (left) and globality (right)",
+                 fontsize=10, y=1.02)
     plt.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close()
     print(f"Saved: {out_path}")
-
-
-def plot_reconstruction_grid_png(shape_name: str, data: dict[str, dict], out_path: str) -> None:
-    """Thin wrapper around explore.plot_reconstruction_grid for static PNG output.
-
-    Not in ALL_FIGURES — invoke with --figures reconstruction_grid --shape <name>.
-    """
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "explore",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "explore.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.plot_reconstruction_grid(shape_name, data, interactive=False, out_path=out_path)
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -690,7 +885,7 @@ def plot_reconstruction_grid_png(shape_name: str, data: dict[str, dict], out_pat
 def print_summary(data: dict[str, dict]) -> None:
     print("\n=== Summary: aggregate R² at sweet-spot k ===")
     for v, d in data.items():
-        pa = d["panel_a"]
+        pa = d["r2"]
         sk = max(pa["k_values"], key=lambda k: pa["aggregate_r2"].get(k, -9))
         r2  = pa["aggregate_r2"][sk]
         std = pa["aggregate_r2_std"][sk]
@@ -746,51 +941,40 @@ def main() -> None:
 
     os.makedirs(FIGS_DIR, exist_ok=True)
 
-    finalized: dict[str, dict] = {}
+    finalised: dict[str, dict] = {}
     loss_data: dict[str, dict[int, dict]] = {}
 
     for v, path in variant_paths.items():
         if not os.path.exists(path):
             print(f"  {v}: {path} not found, skipping.")
             continue
-        raw = load_raw(path)
-        fin, raw_for_logs = ensure_finalized(v, raw)
-        finalized[v] = fin
+        fin = load_snapshot(path)
+        finalised[v] = fin
+        loss_data[v] = extract_loss_curves(fin.get("logs", {}))
 
-        if raw_for_logs is not None:
-            loss_data[v] = extract_loss_curves(raw_for_logs)
-        elif "logs" in fin:
-            loss_data[v] = extract_loss_curves(fin["logs"])
-        else:
-            loss_data[v] = {}
-
-    if not finalized:
+    if not finalised:
         print("No data loaded — nothing to plot.")
         sys.exit(1)
 
-    print_summary(finalized)
+    print_summary(finalised)
 
-    def fig_path(name: str) -> str:
-        return os.path.join(FIGS_DIR, f"{name}.png")
-
-    if "aggregate_r2"  in figures: plot_aggregate_r2(finalized,              fig_path("aggregate_r2"))
-    if "phase_diagram" in figures: plot_phase_diagram(finalized,              fig_path("phase_diagram"))
-    if "reconstruction_regimes" in figures: plot_reconstruction_regimes(finalized, fig_path("reconstruction_regimes"))
-    if "r2_by_type"    in figures: plot_r2_by_type(finalized,           fig_path("r2_by_type"))
-    if "r2_at_ki_bar"  in figures: plot_r2_at_ki_bar(finalized,         fig_path("r2_at_ki_bar"))
-    if "phi_capture"   in figures: plot_phi_capture(finalized,           fig_path("phi_capture"))
-    if "phi_matrix"    in figures: plot_phi_matrix(finalized,            fig_path("phi_matrix"), k=10)
-    if "signed_cohesion" in figures: plot_signed_cohesion(finalized,    fig_path("signed_cohesion"), k=10)
-    if "loss_curves"     in figures: plot_loss_curves(loss_data,         fig_path("loss_curves"))
-    if "tuning_curves"   in figures: plot_tuning_curves(finalized,       fig_path("tuning_curves"))
+    if "aggregate_r2"  in figures: plot_aggregate_r2(finalised,  FIGS_DIR / "aggregate_r2.png")
+    if "phase_diagram" in figures: plot_phase_diagram(finalised, FIGS_DIR / "phase_diagram.png")
+    if "r2_by_type"         in figures: plot_r2_by_type(finalised,           FIGS_DIR / "r2_by_type.png")
+    if "r2_at_ki_bar"       in figures: plot_r2_at_ki_bar(finalised,         FIGS_DIR / "r2_at_ki_bar.png")
+    if "phi_capture"        in figures: plot_phi_capture(finalised,          FIGS_DIR / "phi_capture.png")
+    if "phi_matrix"         in figures: plot_phi_matrix(finalised,           FIGS_DIR / "phi_matrix.png", k=10)
+    if "signed_cohesion"    in figures: plot_signed_cohesion(finalised,      FIGS_DIR / "signed_cohesion.png", k=10)
+    if "loss_curves"        in figures: plot_loss_curves(loss_data,          FIGS_DIR / "loss_curves.png")
+    if "coordinate_encoding" in figures: plot_coordinate_encoding(finalised, FIGS_DIR / "coordinate_encoding.png")
 
     if "reconstruction_grid" in figures:
         if args.shape is None:
             print("Warning: --figures reconstruction_grid requires --shape, skipping.")
         else:
-            plot_reconstruction_grid_png(
-                args.shape, finalized,
-                fig_path(f"reconstruction_grid_{args.shape}"),
+            plot_reconstruction_grid(
+                args.shape, finalised,
+                FIGS_DIR / f"reconstruction_grid_{args.shape}.png",
             )
 
 

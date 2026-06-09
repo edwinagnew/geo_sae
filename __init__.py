@@ -1,6 +1,6 @@
 from .signed_batchtopk_sae import SignedBatchTopK, SignedBatchTopKSAE, SignedBatchTopKSAEConfig
-from .penalized_sae import CoActPenalizedSAE, CoActPenalizedSAEConfig
-from .train import Trainer, TrainConfig, SanityError, make_trainer, generate_shared_data, K_SWEEP
+from .penalised_sae import CoActPenalisedSAE, CoActPenalisedSAEConfig
+from .train import Trainer, TrainConfig, make_trainer, generate_shared_data, K_SWEEP
 from .data import (
     ManifoldInstance,
     ManifoldZoo,
@@ -18,12 +18,11 @@ __all__ = [
     "SignedBatchTopK",
     "SignedBatchTopKSAE",
     "SignedBatchTopKSAEConfig",
-    "CoActPenalizedSAE",
-    "CoActPenalizedSAEConfig",
+    "CoActPenalisedSAE",
+    "CoActPenalisedSAEConfig",
     # Training
     "Trainer",
     "TrainConfig",
-    "SanityError",
     "make_trainer",
     "generate_shared_data",
     "K_SWEEP",

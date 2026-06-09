@@ -1,14 +1,14 @@
 """
 Synthetic manifold zoo (Appendix E, arXiv 2604.28119).
 
-Implements the eight manifold types from Table 4, the RMS-normalization
+Implements the eight manifold types from Table 4, the RMS-normalisation
 calibration (Eq. 12), the random orthonormal ambient embeddings, and the
 additive mixture sampler (Eq. 13).
 
 Output contract: x and contributions are in raw mixture space (no global
-ℓ2 normalization). The training loop normalizes x by its mean ℓ2 norm;
+ℓ2 normalisation). The training loop normalises x by its mean ℓ2 norm;
 eval code must apply the same factor to contributions, or restricted-R²
-will be capped below 1 (Bug 1 in synthetic_experiment_notes.md).
+will be capped below 1 (extract_snapshot divides contributions by norm_scale).
 
 Usage:
     zoo = build_zoo(EASY_CONFIG)
@@ -33,8 +33,8 @@ import numpy as np
 
 
 # ── Raw samplers ──────────────────────────────────────────────────────────────
-# Each returns float64 (n, k_i) — calibration needs the precision.
-# Normalization (Eq. 12) converts to float32.
+# Each returns float64 (n, k_i).
+# Normalisation (Eq. 12) converts to float32.
 
 def _sample_circle(r: float, n: int, rng: np.random.Generator) -> np.ndarray:
     th = rng.uniform(0.0, 2 * math.pi, n)
@@ -50,8 +50,8 @@ def _sample_sphere(r: float, n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _sample_torus(R: float, r: float, n: int, rng: np.random.Generator) -> np.ndarray:
-    # Clifford 4D embedding confirmed in synthetic_experiment_notes.md:
-    # ((R+r cosφ)cosθ, (R+r cosφ)sinθ, r cosφ, r sinφ) — k_i = 4
+    # Clifford 4D embedding per Table 4: ((R+r cosφ)cosθ, (R+r cosφ)sinθ, r cosφ, r sinφ) — k_i = 4
+    # Paper samples θ, φ uniformly in [0, 2π) (Eq. 13: "uniformly on each manifold").
     th = rng.uniform(0.0, 2 * math.pi, n)
     ph = rng.uniform(0.0, 2 * math.pi, n)
     return np.stack([
@@ -176,13 +176,13 @@ class ManifoldInstance:
     mu: np.ndarray   # (k_i,) float32   — calibration centroid
     sigma: float     # scalar           — calibration RMS norm
 
-    def sample_normalized(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        """(n, k_i) float32 — uniform samples in normalized local coordinates."""
+    def sample_normalised(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        """(n, k_i) float32 — uniform samples in normalised local coordinates."""
         raw = _MANIFOLD_TYPES[self.type]["sampler"](n=n, rng=rng, **self.params)
         return ((raw - self.mu) / self.sigma).astype(np.float32)
 
     def embed(self, gamma: np.ndarray) -> np.ndarray:
-        """(n, k_i) normalized coords → (n, d) ambient-space contribution."""
+        """(n, k_i) normalised coords → (n, d) ambient-space contribution."""
         return gamma @ self.V
 
 
@@ -323,7 +323,7 @@ class ManifoldZoo:
                 n_j = int(mask.sum())
                 if n_j == 0:
                     continue
-                gamma = inst.sample_normalized(n_j, rng)  # (n_j, k_i)
+                gamma = inst.sample_normalised(n_j, rng)  # (n_j, k_i)
                 contrib = inst.embed(gamma)               # (n_j, d)
                 x[mask] += contrib
                 if return_ground_truth:
