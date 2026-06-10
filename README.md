@@ -2,9 +2,9 @@
 
 Based on [this](https://arxiv.org/pdf/2604.28119) paper, how to tweak SAEs to learn geometric features? 
 
-Main idea: to achieve *subspace capture*, SAE features should look like coordinates on their respective manifolds. Within a manifold, the embedding directions should be orthogonal to more efficiently encode a basis. Between manifolds, different coordinates should not interfere too much (this is the role of the incoherence assumption in Theorem 1).
+Main idea: to achieve *subspace capture*, SAE features should look like coordinates on their respective manifolds. Within a manifold, the feature directions should be orthogonal to more efficiently encode a basis. Between manifolds, different coordinates should not interfere too much (this is the role of the incoherence assumption in Theorem 1).
 
-Two methods are implemented in this repo:
+Two approaches are implemented in this repo:
 1. `SignedBatchTopKSAE` - inherits `BatchTopKTrainingSAE` from `sae_lens` but keeps the top k **absolute-value** activations. This makes it easier for features to encode coordinates since activations may be negative.
 2. `CoActPenalisedSAE` - same as above but also adds a coherence penalty on decoder directions weighted by how often features co-activate. This actively encourages the features to span the embedding spaces as compactly as possible. 
 
