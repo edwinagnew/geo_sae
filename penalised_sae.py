@@ -40,9 +40,9 @@ class CoActPenalisedSAE(SignedBatchTopKSAE):
     orthogonality, nudging the SAE toward compact subspace capture (a small group
     of atoms spanning each manifold) rather than tiling/shattering.
 
-    Key design choices (see implementation_guide.md §4–5 for rationale):
+    Key design choices:
     - C built from |z|, not signed z: signed correlation is ~0 within a manifold.
-    - C is detached + EMA'd: not a thing to optimise; we shape geometry Γ, not C.
+    - C is detached + EMA'd: not a thing to optimise; we shape geometry, not C.
     - Gram from W_dec (rows = atoms): penalty is on decoder geometry.
     - Diagonal excluded: self-coherence is always 1, not informative.
     - beta warmup: C_ema is uninformative for the first ~warmup_steps batches.

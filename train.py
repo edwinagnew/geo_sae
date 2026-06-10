@@ -49,7 +49,7 @@ class TrainConfig:
     eval_every: int = 1_000
     device: str = "cpu"
     use_l1_loss: bool = True   # Appendix E: "ℓ1 reconstruction error + dead-neuron reanimation"
-    r2_method: str = "both"  # "centred" | "uncentred" | "both" — passed to process_snapshot
+    r2_method: str = "centred"  # "centred" | "uncentred" | "both" — passed to process_snapshot
 
 
 # ── Trainer ───────────────────────────────────────────────────────────────────
@@ -181,7 +181,6 @@ class Trainer:
         self.optimizer.zero_grad()
         elapsed = time.perf_counter() - t0
 
-        # Update per-batch dead mask: atoms that didn't fire on any sample this batch
         with torch.no_grad():
             fired = (output.feature_acts.detach() != 0).any(dim=0).cpu()
             self.dead_mask = ~fired
@@ -343,9 +342,14 @@ class Trainer:
         snap = self.extract_snapshot()
         k = int(snap["k"])
         result = process_snapshot(k, snap, r2_method=self.cfg.r2_method)
-        r2_mean = result["r2"]["aggregate_r2"].get(k, float("nan"))
+        r2_c = result["r2"]["aggregate_r2"].get(k, float("nan"))
+        r2_u = result["r2"].get("uncentred_aggregate_r2", {}).get(k, float("nan"))
+        if math.isfinite(r2_u):
+            r2_str = f"R²(c)={r2_c:.3f}  R²(u)={r2_u:.3f}"
+        else:
+            r2_str = f"R²={r2_c:.3f}"
         print(f"Final: fvu={em['eval/fvu']:.4f}  L0={em['eval/mean_l0']:.1f}  "
-              f"dead={em['eval/n_dead']}{neg}  R²={r2_mean:.3f}")
+              f"dead={em['eval/n_dead']}{neg}  {r2_str}")
         if include_vis_data:
             # Scale isolated contribs up to training distribution norm before encoding,
             # then scale codes back so reconstruction is at the original contribution scale.

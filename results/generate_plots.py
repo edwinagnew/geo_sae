@@ -1,5 +1,5 @@
 """
-Generate Figure 4 plots from snapshot files.
+Generate plots from snapshot files.
 
 Usage:
     python results/generate_plots.py <snapshot_files...> [--figures FIGURE ...]
@@ -9,9 +9,7 @@ Examples:
     python results/generate_plots.py results/snapshots/*4.b --figures aggregate_r2 phase_diagram
 
 Snapshot filenames must follow the pattern {variant}_snapshots{suffix}
-(e.g. baseline_snapshots3.b, signed_snapshots3.b). The suffix determines
-the output tag used in figure filenames (e.g. suffix 3.b → tag 3b →
-aggregate_r2_3b.png).
+(e.g. baseline_snapshots3.b, signed_snapshots3.b).
 """
 from __future__ import annotations
 
@@ -33,11 +31,11 @@ ALL_FIGURES = [
     "aggregate_r2",
     "phase_diagram",
     "r2_by_type",
-    "r2_at_ki_bar",
-    "phi_capture",
-    "phi_matrix",
-    "signed_cohesion",
-    "loss_curves",
+    #"r2_at_ki_bar",
+    #"phi_capture",
+    #"phi_matrix",
+    #"signed_cohesion",
+    #"loss_curves",
     "coordinate_encoding",
 ]
 EXTRA_FIGURES = ["reconstruction_grid"]  # not in ALL_FIGURES; requires --shape
@@ -55,6 +53,14 @@ _KI = {"circle": 2, "sphere": 3, "torus": 4, "mobius": 3,
        "swiss_roll": 3, "helix": 3, "flat_disk": 2, "segment": 1}
 
 
+def _setup_mpl():
+    """Import matplotlib with the Agg backend — safe for headless/scripted use."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
 def _inst_type(name: str) -> str:
     for t in _KI:
         if name.startswith(t):
@@ -62,19 +68,13 @@ def _inst_type(name: str) -> str:
     return name.split("_")[0]
 
 
-def parse_snapshot_filename(path: str) -> tuple[str, str] | None:
-    """Extract (variant, tag) from a snapshot filename.
+def parse_snapshot_filename(path: str) -> str | None:
+    """Return the variant name from a snapshot filename, or None if unrecognised.
 
-    Pattern: {variant}_snapshots{suffix}  e.g. baseline_snapshots3.b → ("baseline", "3b")
-    Returns None if the filename doesn't match.
+    Pattern: {variant}_snapshots{suffix}  e.g. baseline_snapshots3.b → "baseline"
     """
-    basename = os.path.basename(path)
-    m = re.match(r"^(.+?)_snapshots(.+)$", basename)
-    if not m:
-        return None
-    variant = m.group(1)
-    tag = m.group(2).replace(".", "")
-    return variant, tag
+    m = re.match(r"^(.+?)_snapshots", os.path.basename(path))
+    return m.group(1) if m else None
 
 
 # ── Load ──────────────────────────────────────────────────────────────────────
@@ -102,9 +102,7 @@ def extract_loss_curves(logs: dict) -> dict[int, dict[str, list]]:
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot_loss_curves(loss_data: dict[str, dict[int, dict]], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     variants_with_loss = {v: lc for v, lc in loss_data.items() if lc}
     if not variants_with_loss:
@@ -152,21 +150,20 @@ def plot_loss_curves(loss_data: dict[str, dict[int, dict]], out_path: str) -> No
 
 
 def plot_aggregate_r2(data: dict[str, dict], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     fig, ax = plt.subplots(figsize=(6, 4))
     for v, d in data.items():
-        pa = d["r2"]
-        ks   = pa["k_values"]
-        r2s  = [pa["aggregate_r2"][k] for k in ks]
-        stds = [pa["aggregate_r2_std"][k] for k in ks]
-        ax.plot(ks, r2s, "o-", color=COLORS.get(v, "gray"), label=LABELS.get(v, v))
+        pa    = d["r2"]
+        ks    = pa["k_values"]
+        color = COLORS.get(v, "gray")
+        r2s   = [pa["aggregate_r2"][k] for k in ks]
+        stds  = [pa["aggregate_r2_std"][k] for k in ks]
+        ax.plot(ks, r2s, "o-", color=color, label=LABELS.get(v, v))
         ax.fill_between(ks,
                         [r - s for r, s in zip(r2s, stds)],
                         [r + s for r, s in zip(r2s, stds)],
-                        alpha=0.15, color=COLORS.get(v, "gray"))
+                        alpha=0.15, color=color)
     ax.set_xlabel("Training sparsity k")
     ax.set_ylabel("Aggregate restricted R²")
     ax.set_title("Aggregate restricted R² vs training sparsity k")
@@ -179,9 +176,7 @@ def plot_aggregate_r2(data: dict[str, dict], out_path: str) -> None:
 
 
 def plot_phase_diagram(data: dict[str, dict], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     fig, (ax_sup, ax_rf) = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle("Phase diagram: support size and RF diameter vs k", fontsize=10)
@@ -203,9 +198,7 @@ def plot_phase_diagram(data: dict[str, dict], out_path: str) -> None:
 
 
 def plot_r2_by_type(data: dict[str, dict], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     types = sorted(_KI.keys())
 
@@ -252,9 +245,7 @@ def plot_r2_by_type(data: dict[str, dict], out_path: str) -> None:
 
 
 def plot_r2_at_ki_bar(data: dict[str, dict], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     types = sorted(_KI.keys())
     k_vals = sorted(next(iter(data.values()))["r2"]["k_values"])
@@ -297,10 +288,22 @@ def plot_r2_at_ki_bar(data: dict[str, dict], out_path: str) -> None:
     print(f"Saved: {out_path}")
 
 
+def _within_phi_vals(phi: np.ndarray, scores: np.ndarray, inst_names: list[str]) -> list[float]:
+    """Off-diagonal phi values between each manifold's top-k_i atoms, pooled across instances."""
+    vals = []
+    for j, inst_name in enumerate(inst_names):
+        ki = _KI.get(_inst_type(inst_name), 2)
+        top_atoms = np.argsort(scores[:, j])[-ki:]
+        if len(top_atoms) < 2:
+            continue
+        sub  = phi[np.ix_(top_atoms, top_atoms)]
+        mask = ~np.eye(len(top_atoms), dtype=bool)
+        vals.extend(sub[mask].tolist())
+    return vals
+
+
 def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     k_vals = sorted(next(iter(data.values()))["r2"]["k_values"])
     sweet_k = {}
@@ -320,19 +323,9 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
             if k not in pc["phi_matrices"]:
                 mean_phis.append(float("nan"))
                 continue
-            phi       = pc["phi_matrices"][k]
-            scores    = pc["atom_manifold_scores"][k]
-            inst_names = pc["instance_names"]
-            within_vals = []
-            for j, inst_name in enumerate(inst_names):
-                ki = _KI.get(_inst_type(inst_name), 2)
-                top_atoms = np.argsort(scores[:, j])[-ki:]
-                if len(top_atoms) < 2:
-                    continue
-                sub  = phi[np.ix_(top_atoms, top_atoms)]
-                mask = ~np.eye(len(top_atoms), dtype=bool)
-                within_vals.extend(sub[mask].tolist())
-            mean_phis.append(float(np.mean(within_vals)) if within_vals else float("nan"))
+            vals = _within_phi_vals(pc["phi_matrices"][k], pc["atom_manifold_scores"][k],
+                                    pc["instance_names"])
+            mean_phis.append(float(np.mean(vals)) if vals else float("nan"))
         ax_mean.plot(k_vals, mean_phis, "o-", color=COLORS.get(v, "gray"), label=LABELS.get(v, v))
 
     ax_mean.set_xlabel("Training sparsity k")
@@ -344,19 +337,9 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
         pc = d["phi"]
         if ref_k not in pc["phi_matrices"]:
             continue
-        phi       = pc["phi_matrices"][ref_k]
-        scores    = pc["atom_manifold_scores"][ref_k]
-        inst_names = pc["instance_names"]
-        within_vals = []
-        for j, inst_name in enumerate(inst_names):
-            ki = _KI.get(_inst_type(inst_name), 2)
-            top_atoms = np.argsort(scores[:, j])[-ki:]
-            if len(top_atoms) < 2:
-                continue
-            sub  = phi[np.ix_(top_atoms, top_atoms)]
-            mask = ~np.eye(len(top_atoms), dtype=bool)
-            within_vals.extend(sub[mask].tolist())
-        ax_hist.hist(within_vals, bins=40, alpha=0.5, color=COLORS.get(v, "gray"),
+        vals = _within_phi_vals(pc["phi_matrices"][ref_k], pc["atom_manifold_scores"][ref_k],
+                                pc["instance_names"])
+        ax_hist.hist(vals, bins=40, alpha=0.5, color=COLORS.get(v, "gray"),
                      label=LABELS.get(v, v), density=True)
 
     ax_hist.set_xlabel("Within-manifold phi (pairwise)")
@@ -370,9 +353,7 @@ def plot_phi_capture(data: dict[str, dict], out_path: str) -> None:
 
 
 def plot_phi_matrix(data: dict[str, dict], out_path: str, k: int = 10) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     plot_variants = {v: d for v, d in data.items() if v != "baseline_batch"}
     if not plot_variants:
@@ -425,9 +406,7 @@ def plot_phi_matrix(data: dict[str, dict], out_path: str, k: int = 10) -> None:
 
 
 def plot_signed_cohesion(data: dict[str, dict], out_path: str, k: int = 10, L0: int = 4) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
 
     pc0        = next(iter(data.values()))["phi"]
     inst_names = pc0["instance_names"]
@@ -671,9 +650,7 @@ def _plotly_grid(shape_name: str, variant_panels: dict):
 
 
 def _matplotlib_grid(shape_name: str, variant_panels: dict, out_path: str | None):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = _setup_mpl()
     from matplotlib.gridspec import GridSpec
 
     variants     = list(variant_panels.keys())
@@ -731,15 +708,12 @@ def plot_coordinate_encoding(
 
     Uses vis_data (stored at k=10) from each snapshot.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+    plt = _setup_mpl()
+    from matplotlib.gridspec import GridSpec
 
     if show_types is None:
         show_types = ["segment", "circle", "sphere"]
 
-    # variant → type → {"z_atoms": (n_j, k_i), "colors": (n_j,), "globality": (k_i,)}
     panels: dict[str, dict[str, dict]] = {}
 
     for variant, snap in data.items():
@@ -762,7 +736,7 @@ def plot_coordinate_encoding(
 
             # Expand sparse iso codes and select the k_i atoms with highest mean |z|.
             # With isolated single-manifold inputs, these are directly the atoms that
-            # respond to this manifold — no OMP needed.
+            # respond to this manifold
             codes = _results.expand_iso_codes(inst, d_sae)    # (n_j, d_sae)
             top_atoms = np.argsort(-np.abs(codes).mean(0))[:k_i]
 
@@ -785,18 +759,15 @@ def plot_coordinate_encoding(
 
     n_variants = len(variants_with_data)
     n_types    = len(show_types)
-    n_cols     = n_types + 1  # scatter cols + globality panel
+    n_cols     = n_types + 1
 
     fig = plt.figure(figsize=(3.0 * n_types + 3.5, 2.8 * n_variants))
     gs  = GridSpec(n_variants, n_cols, figure=fig,
                    hspace=0.25, wspace=0.35,
                    width_ratios=[3.0] * n_types + [3.5])
 
-    globality_by_variant: dict[str, dict[str, np.ndarray]] = {}
-
     for vi, variant in enumerate(variants_with_data):
         vp = panels[variant]
-        globality_by_variant[variant] = {}
 
         for ti, mtype in enumerate(show_types):
             ax = fig.add_subplot(gs[vi, ti])
@@ -804,18 +775,11 @@ def plot_coordinate_encoding(
                 ax.axis("off")
                 continue
 
-            p      = vp[mtype]
-            z      = p["z_atoms"]    # (n_j, k_i)
-            k_i    = p["k_i"]
-            globality_by_variant[variant][mtype] = p["globality"]
+            p          = vp[mtype]
+            z          = p["z_atoms"]   # (n_j, k_i)
+            k_i        = p["k_i"]
+            coord_axis = p["colors"]    # [0,1] scalar derived from intrinsic coords
 
-            # X-axis: normalised intrinsic coordinate (atan2-based for k_i≥2, linear for k_i=1)
-            coord_axis = p["colors"]  # [0,1] scalar derived from intrinsic coords
-
-            # Activation profiles: each atom's activation vs intrinsic coordinate.
-            # For k_i=1: single curve; for k_i>1: k_i overlaid curves.
-            # Signed atoms: smooth/global (span [−1,1] with a curve).
-            # Baseline atoms: positive bumps (ReLU) covering different regions.
             sort_idx = np.argsort(coord_axis)
             x_sorted = coord_axis[sort_idx]
             z_sorted = z[sort_idx]
@@ -838,40 +802,32 @@ def plot_coordinate_encoding(
             else:
                 ax.set_ylabel("activation", fontsize=7)
 
-        # Globality panel — collected after loop
         ax_glob = fig.add_subplot(gs[vi, n_types])
         x_pos = 0
-        for ti2, mtype2 in enumerate(show_types):
+        tick_positions: list[float] = []
+        tick_labels: list[str] = []
+        for mtype2 in show_types:
             if mtype2 not in vp:
                 continue
-            glob = globality_by_variant[variant][mtype2]  # (k_i,)
-            k_i2 = vp[mtype2]["k_i"]
-            color = COLORS.get(variant, "gray")
+            glob = vp[mtype2]["globality"]
+            k_i2 = len(glob)
+            tick_positions.append(x_pos + (k_i2 - 1) / 2)
+            tick_labels.append(mtype2)
             for ai, g in enumerate(glob):
-                ax_glob.bar(x_pos, g, color=color, alpha=0.7 - 0.15 * ai, edgecolor="none")
-                ax_glob.text(x_pos, g + 0.02, f"{g:.2f}", ha="center", va="bottom",
-                             fontsize=5.5)
+                ax_glob.bar(x_pos, g, color=ATOM_COLORS[ai % len(ATOM_COLORS)],
+                            alpha=0.8, edgecolor="none")
                 x_pos += 1
             x_pos += 0.4  # gap between types
 
         ax_glob.set_ylim(0, 1.15)
         ax_glob.axhline(1.0, color="gray", lw=0.6, ls="--", alpha=0.7)
-        ax_glob.set_xticks([])
+        ax_glob.set_xticks(tick_positions)
+        ax_glob.set_xticklabels(tick_labels if vi == n_variants - 1 else [""] * len(tick_labels),
+                                fontsize=7)
         ax_glob.set_ylabel("support fraction", fontsize=7)
-        ax_glob.tick_params(labelsize=6)
+        ax_glob.tick_params(labelsize=6, bottom=False)
         if vi == 0:
             ax_glob.set_title("Globality of selected atoms", fontsize=9)
-        if vi == n_variants - 1:
-            # Add type labels at bottom
-            x_pos2 = 0
-            for mtype2 in show_types:
-                if mtype2 not in vp:
-                    continue
-                k_i3 = vp[mtype2]["k_i"]
-                mid = x_pos2 + (k_i3 - 1) / 2
-                ax_glob.text(mid, -0.13, mtype2[:5], ha="center", va="top",
-                             fontsize=6.5, transform=ax_glob.transData)
-                x_pos2 += k_i3 + 0.4
 
     plt.suptitle("Coordinate encoding: activation vs intrinsic coordinate (left) and globality (right)",
                  fontsize=10, y=1.02)
@@ -887,9 +843,13 @@ def print_summary(data: dict[str, dict]) -> None:
     for v, d in data.items():
         pa = d["r2"]
         sk = max(pa["k_values"], key=lambda k: pa["aggregate_r2"].get(k, -9))
-        r2  = pa["aggregate_r2"][sk]
-        std = pa["aggregate_r2_std"][sk]
-        print(f"  {LABELS.get(v, v):22s}  sweet k={sk:>2}  R²={r2:.4f} ± {std:.4f}")
+        r2_c  = pa["aggregate_r2"][sk]
+        std_c = pa["aggregate_r2_std"][sk]
+        line = f"  {LABELS.get(v, v):22s}  sweet k={sk:>2}  R²(c)={r2_c:.4f} ± {std_c:.4f}"
+        if "uncentred_aggregate_r2" in pa:
+            r2_u = pa["uncentred_aggregate_r2"].get(sk, float("nan"))
+            line += f"  R²(u)={r2_u:.4f}"
+        print(line)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -921,18 +881,12 @@ def main() -> None:
     figures = set(args.figures) if args.figures else set(ALL_FIGURES)
 
     variant_paths: dict[str, str] = {}
-    tag: str | None = None
 
     for path in args.files:
-        parsed = parse_snapshot_filename(path)
-        if parsed is None:
+        variant = parse_snapshot_filename(path)
+        if variant is None:
             print(f"Warning: skipping unrecognized filename: {os.path.basename(path)}")
             continue
-        variant, file_tag = parsed
-        if tag is None:
-            tag = file_tag
-        elif file_tag != tag:
-            print(f"Warning: mixed suffix tags ({tag} vs {file_tag}), using {tag!r} for output names")
         variant_paths[variant] = path
 
     if not variant_paths:

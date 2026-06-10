@@ -61,17 +61,16 @@ def _mean_pairwise_dist(X: np.ndarray, max_pts: int = 2000, n_pairs: int = 5000)
     return float(np.sqrt(((X[a] - X[b]) ** 2).sum(-1)).mean())
 
 
-# ── Geometric greedy OMP + SVD deflation (paper's R² algorithm, Appendix E) ──────
+# ── Geometric greedy OMP + SVD deflation (paper Appendix E, step 3) ─────────────
 #
-# Selection:    score = ||residual @ d̂_j||² per atom, where d̂_j = d_j / ||d_j||
-#               (paper uses unit-norm decoder columns; we normalise explicitly)
-# Deflation:    exact SVD projection onto span(W_dec[selected]) after each step;
-#               this is OMP-style orthogonalizing deflation (Appendix D frames
-#               recovery via OMP, which resolves step 3's ambiguity toward SVD)
-# Reconstruction: actual SAE codes — M_hat^(n) = Z_i^(n) @ W_dec^T  (steps 4+5)
-# R²:           1 - Σ‖m − m̂‖² / Σ‖m − m̄‖²  (paper Eq. 14)
-#               Greedy selection runs on centered M_c; residual uses raw M_i.
-#               Denominator Σ‖m − m̄‖² = ‖M_c‖²_F.
+# Step 3 score: Σ_j (r_j · d̂_a)² / ||d_a||² — variance of M_c projected onto each
+#               decoder direction. Selection is purely geometric: no codes involved.
+# Deflation:    SVD projection onto span(W_dec[selected]) — OMP-style orthogonalisation
+#               (Appendix D frames recovery via OMP; SVD handles near-collinear atoms).
+# Steps 4+5:   M̂^(n) = Z_i^(n) @ W_dec^T using the SAE's actual codes on in-distribution
+#               inputs — selection is geometric but reconstruction uses real activations.
+# centre_mhat: not in the paper; subtracts mean of M̂ before computing Eq. 14 residual.
+#               Controlled via r2_method="centred" in process_snapshot.
 
 def _geometric_greedy_gpu_t(
     m_c_t: "torch.Tensor",
@@ -79,9 +78,10 @@ def _geometric_greedy_gpu_t(
     W_dec_np: np.ndarray,
     n: int,
 ) -> list[int]:
-    """Geometric OMP with SVD deflation. GPU for scoring, CPU for SVD (tiny matrix).
+    """Paper Appendix E step 3: geometric greedy OMP with SVD deflation.
 
-    Basis (rank × d) is the only CPU→GPU transfer per step — negligible cost.
+    Scoring and residual projection run on GPU; SVD runs on CPU (selected submatrix
+    is at most n_sel × d — always tiny).
     """
     d_sae = W_t.shape[0]
     residual_t = m_c_t.clone()
@@ -108,7 +108,7 @@ def _geometric_greedy_gpu_t(
 
 
 def _geometric_greedy_np(m_c: np.ndarray, W_dec: np.ndarray, n: int) -> list[int]:
-    """Numpy fallback — geometric OMP with SVD deflation."""
+    """Numpy fallback for _geometric_greedy_gpu_t — same algorithm, no GPU required."""
     residual = m_c.copy()
     alive = np.ones(W_dec.shape[0], dtype=bool)
     selected: list[int] = []
@@ -116,48 +116,6 @@ def _geometric_greedy_np(m_c: np.ndarray, W_dec: np.ndarray, n: int) -> list[int
 
     for _ in range(min(n, W_dec.shape[0])):
         scores = ((residual @ W_dec.T) ** 2).sum(0) / d_norms_sq   # normalise by ||d_j||²
-        scores[~alive] = -1.0
-        best = int(np.argmax(scores))
-        if scores[best] <= 0:
-            break
-        selected.append(best)
-        alive[best] = False
-        _, s, Vt = np.linalg.svd(W_dec[selected], full_matrices=False)
-        basis = Vt[s > 1e-8]
-        residual = m_c - (m_c @ basis.T) @ basis
-
-    return selected
-
-
-def _code_greedy_np(
-    Z_i: np.ndarray,
-    m_c: np.ndarray,
-    W_dec: np.ndarray,
-    n: int,
-) -> list[int]:
-    """Code-based greedy OMP: atoms selected by code-weighted alignment with residual.
-
-    Geometric OMP (paper, Appendix E step 3) scores each atom by decoder direction
-    variance alone, ignoring actual activation magnitudes:
-        geo_score_a = Σ_j (r_j · d̂_a)²
-
-    This alternative weights by actual codes on the manifold instance:
-        code_score_a = (Σ_j z_{j,a} · r_j · W_dec[a])² / (Σ_j z_{j,a}² · ‖W_dec[a]‖²)
-
-    By Cauchy–Schwarz, code_score ≤ geo_score always. Atoms that rarely fire on this
-    manifold instance are penalised even if their decoder direction is well-aligned.
-    SVD deflation on selected decoder rows is identical to geometric OMP.
-    """
-    residual = m_c.copy()
-    alive = np.ones(W_dec.shape[0], dtype=bool)
-    selected: list[int] = []
-    d_norms_sq  = (W_dec ** 2).sum(1).clip(1e-10)   # (d_sae,) ‖W_dec[a]‖²
-    code_energy = (Z_i  ** 2).sum(0) + 1e-12         # (d_sae,) Σ_j z_{j,a}²
-
-    for _ in range(min(n, W_dec.shape[0])):
-        geo_proj  = residual @ W_dec.T                # (n_j, d_sae): r_j · W_dec[a]
-        code_corr = (Z_i * geo_proj).sum(0)           # (d_sae,): Σ_j z_{j,a} * r_j · W_dec[a]
-        scores = code_corr ** 2 / (code_energy * d_norms_sq)
         scores[~alive] = -1.0
         best = int(np.argmax(scores))
         if scores[best] <= 0:
@@ -188,12 +146,9 @@ def _r2_sweep_for_instance(
     n_atoms_range: list[int],
     centre_mhat: bool = False,
 ) -> list[float]:
-    """R² sweep — numpy fallback. Implements paper Appendix E Eq. 14.
+    """Numpy fallback for the per-instance R² sweep in _compute_r2.
 
-    Greedy selection (step 3) operates on centered M_c to isolate variance.
-    Residual (step 6 numerator) uses raw M_i per Eq. 14: Σ‖m − m̂‖².
-    Denominator: Σ‖m − m̄‖² = ‖M_c‖²_F.
-    centre_mhat is not in the paper; subtracts M̂ mean to diagnose mean-shift.
+    centre_mhat is not in the paper; see the block comment above _geometric_greedy_gpu_t.
     """
     if len(Z_i) < 10:
         return [float("nan")] * len(n_atoms_range)
@@ -210,30 +165,6 @@ def _r2_sweep_for_instance(
         if centre_mhat:
             M_hat = M_hat - M_hat.mean(0)
         ss_res = float(((M_i - M_hat) ** 2).sum())                     # Eq. 14 numerator
-        results.append(float(1.0 - ss_res / (ss_tot + 1e-12)))
-    return results
-
-
-def _r2_sweep_code_greedy(
-    Z_i: np.ndarray,
-    M_i: np.ndarray,
-    W_dec: np.ndarray,
-    n_atoms_range: list[int],
-) -> list[float]:
-    """R² sweep using code-based greedy OMP (numpy only). Pair with _r2_sweep_for_instance."""
-    if len(Z_i) < 10:
-        return [float("nan")] * len(n_atoms_range)
-    M_c = M_i - M_i.mean(0)
-    ss_tot = float((M_c ** 2).sum())
-    if ss_tot < 1e-12:
-        return [1.0] * len(n_atoms_range)
-    selected = _code_greedy_np(Z_i, M_c, W_dec, max(n_atoms_range))
-    n_sel = len(selected)
-    results = []
-    for n in n_atoms_range:
-        n_use = min(n, n_sel)
-        M_hat = Z_i[:, selected[:n_use]] @ W_dec[selected[:n_use]] if n_use > 0 else np.zeros_like(M_i)
-        ss_res = float(((M_i - M_hat) ** 2).sum())
         results.append(float(1.0 - ss_res / (ss_tot + 1e-12)))
     return results
 
@@ -416,10 +347,12 @@ def _compute_r2(
     max_atoms: int,
     centre_mhat: bool = True,
 ) -> dict:
-    """Compute restricted R² for one snapshot using the paper's geometric greedy OMP (Appendix E).
+    """Restricted R² per paper Appendix E / Eq. 14, over all manifold instances at sparsity k.
 
-    centre_mhat=True  — centres M̂ before computing residual (inflates R²; ~0.68).
-    centre_mhat=False — paper Eq. 14 exactly (R²~0.50).
+    centre_mhat=False is paper-exact. centre_mhat=True subtracts the mean of M̂ before
+    computing the residual — not in the paper, but inflates R² to ~0.68 vs ~0.50.
+    Controlled via r2_method in process_snapshot; do not call directly with centre_mhat
+    unless you know what you want.
     """
 
     Z = snap["eval_codes"]         # (N, c) full-eval SAE codes
@@ -583,19 +516,18 @@ def process_snapshot(
     support_percentile: float = 10.0,
     r2_method: str = "centred",
 ) -> dict:
-    """Process one raw snapshot into a compact per-k metrics dict.
+    """Compute metrics from one raw snapshot and discard the large raw arrays.
 
-    Computes R², coverage, phi, and compressed logs — then discards raw arrays
-    (eval_codes, W_dec, active_mask, instance_contribs, instance_coords).
-    The returned dict is ~10MB vs ~2GB for the raw snapshot.
+    Raw arrays (eval_codes, W_dec, active_mask, instance_contribs, instance_coords)
+    are not stored — the returned dict is ~10MB vs ~2GB for the raw snapshot.
 
-    r2_method controls which R² formula to use:
-      "centred"   (default) — centres M̂ before residual; ~0.68.
-      "uncentred"           — paper Eq. 14 exactly; ~0.50.
-      "both"                — centred (primary keys) + uncentred stored under
+    r2_method:
+      "centred"   (default) — centres M̂ before Eq. 14 residual; R²~0.68.
+      "uncentred"           — paper Eq. 14 exactly; R²~0.50.
+      "both"                — centred values in primary keys; uncentred stored under
                               uncentred_aggregate_r2 / uncentred_r2_sweep.
 
-    Pass to collate_snapshots() once all k values are done.
+    Pass the result to collate_snapshots() once all k values are processed.
     """
     print(f"  k={k}: computing metrics", flush=True)
 
@@ -718,17 +650,14 @@ def compute_r2_from_vis_data(
     max_atoms: int = 25,
     centre_mhat: bool = False,
 ) -> dict:
-    """Compute R² sweep from a vis_data payload — no re-training needed.
+    """R² sweep from a vis_data payload — no retraining needed.
 
-    Works on finalised snapshots at the single k stored in vis_data (k=10 by default).
-    Uses isolated single-manifold codes (iso_indices/iso_values), so results reflect
-    per-manifold reconstruction quality on single-manifold inputs rather than the
-    mixed-L0 snapshot R² (which the paper uses; see _compute_r2 for that).
+    Uses isolated single-manifold codes (iso_indices/iso_values from build_vis_data),
+    so results differ from _compute_r2 which uses mixed-L0 in-distribution codes
+    as the paper specifies. Useful for post-hoc diagnostics on saved snapshots.
 
-    centre_mhat=False (default) matches paper Eq. 14. Pass True to diagnose
-    mean-shift effects (inflates R² by removing the mean of M̂).
-
-    Returns dict with keys: k, n_atoms_range, r2_sweep, aggregate_r2, centre_mhat.
+    centre_mhat=False matches paper Eq. 14; True inflates R² (see block comment above
+    _geometric_greedy_gpu_t).
     """
     W_dec = vis_data["W_dec"]
     d_sae = W_dec.shape[0]

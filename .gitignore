@@ -2,3 +2,4 @@ __pycache__/
 results/snapshots/
 .claude/
 tmp_test/
+*ipynb
